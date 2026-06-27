@@ -30,6 +30,7 @@
   var status = null;        // last server status
   var players = { w: false, b: false };
   var drawOfferFrom = null; // color with an outstanding draw offer
+  var justRestored = false; // true while awaiting a 'joined' after a restore
 
   // ---- View state ----
   var manualFlip = false;
@@ -171,7 +172,8 @@
         loadState(msg.state, msg.status, null, true);
         location.hash = roomCode;
         showGame();
-        if (msg.reconnected) addChat('system', 'Reconnected to your game.');
+        if (justRestored) { addChat('system', 'Game restored.'); justRestored = false; }
+        else if (msg.reconnected) addChat('system', 'Reconnected to your game.');
         else if (msg.spectator) addChat('system', 'You are spectating.');
         else if (!wasOver) Sound.play('start');
         updateDrawUI();
@@ -205,6 +207,18 @@
         break;
       case 'pong':
         lastPongAt = Date.now();
+        break;
+      case 'noRoom':
+        // The server no longer has this room (it restarted, or the room was
+        // cleaned up while everyone was away). If we still hold the game state,
+        // re-seed the room on the server so play can continue seamlessly.
+        var snap = localSnapshotFor(msg.room);
+        if (snap) {
+          justRestored = true;
+          send({ type: 'restore', room: snap.room, playerId: playerId, color: snap.color, state: snap.state });
+        } else {
+          flashError('Room "' + msg.room + '" not found');
+        }
         break;
       case 'error':
         flashError(msg.message);
@@ -249,6 +263,29 @@
     if (status && status.over && lastMove !== undefined) showResult();
     else hideResult();
     if (status && status.over && isJoin) showResult();
+
+    saveSnapshot();
+  }
+
+  // Persist the current game so we can re-seed the server (or recover after a
+  // refresh) if the room disappears server-side.
+  function saveSnapshot() {
+    if (!liveGame || !roomCode || !myColor) return;
+    try {
+      sessionStorage.setItem('chessSnap', JSON.stringify({
+        room: roomCode, color: myColor, state: liveGame.getState()
+      }));
+    } catch (e) {}
+  }
+  function localSnapshotFor(room) {
+    if (liveGame && myColor && roomCode === room) {
+      return { room: room, color: myColor, state: liveGame.getState() };
+    }
+    try {
+      var s = JSON.parse(sessionStorage.getItem('chessSnap') || 'null');
+      if (s && s.room === room && s.color && s.state) return s;
+    } catch (e) {}
+    return null;
   }
 
   function playMoveSound(rec) {

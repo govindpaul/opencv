@@ -212,6 +212,42 @@ async function main() {
      'game restored from disk across server restart');
   pcli2.close();
 
+  // ---- 13. Restore: re-seed a room the server has lost ----
+  // Simulate the room being gone (server has no persistence file): a client
+  // that still holds the game state should be able to restore it and continue.
+  try { fs.unlinkSync(DATA); } catch (e) {}
+  var rcli = client();
+  await wait(120);
+  // join a room code that does not exist -> server replies noRoom
+  send(rcli, { type: 'join', room: 'ABCDEF', playerId: 'restorer1' });
+  var nr = await waitFor(rcli, 'noRoom');
+  ok(nr && nr.room === 'ABCDEF', 'server replies noRoom for a missing room');
+  // restore it from a saved state (1.e4)
+  var savedState = {
+    board: (function () {
+      var g = require('../src/chess-engine');
+      var game = new g();
+      game.move({ from: 'e2', to: 'e4' });
+      return game.getState();
+    })()
+  }.board;
+  send(rcli, { type: 'restore', room: 'ABCDEF', playerId: 'restorer1', color: 'w', state: savedState });
+  var rj = await waitFor(rcli, 'joined');
+  ok(rj && rj.color === 'w' && rj.state.history.length === 1 && rj.state.history[0].san === 'e4',
+     'restore re-seeds the room with the saved game (1.e4) and seats player as white');
+  // opponent joins the now-restored room and gets black
+  var rOpp = client();
+  await wait(100);
+  send(rOpp, { type: 'join', room: 'ABCDEF', playerId: 'restorer2' });
+  var rjo = await waitFor(rOpp, 'joined');
+  ok(rjo && rjo.color === 'b' && rjo.state.history.length === 1, 'opponent rejoins restored room as black with the same position');
+  // and play continues: black replies e5
+  send(rOpp, { type: 'move', from: 'e7', to: 'e5' });
+  await wait(80);
+  var contSt = last(rcli, 'state');
+  ok(contSt && contSt.state.history.length === 2, 'play continues normally after restore');
+  rcli.close(); rOpp.close();
+
   srv.kill('SIGKILL');
   try { fs.unlinkSync(DATA); } catch (e) {}
 

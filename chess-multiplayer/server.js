@@ -358,6 +358,8 @@ function handleMessage(client, msg) {
       return doJoin(client, createRoom().code, msg.playerId);
     case 'join':
       return doJoin(client, String(msg.room || '').toUpperCase().trim(), msg.playerId);
+    case 'restore':
+      return doRestore(client, msg);
     case 'move':
       return doMove(client, msg);
     case 'resign':
@@ -377,10 +379,13 @@ function handleMessage(client, msg) {
   }
 }
 
-function doJoin(client, code, playerId) {
+function doJoin(client, code, playerId, preferredColor) {
   var room = rooms[code];
   if (!room) {
-    return send(client.ws, { type: 'error', message: 'Room "' + code + '" not found' });
+    // Distinct message so the client can offer to re-seed the room from its
+    // own saved game state (handles the room being gone after the server
+    // restarted or the room was cleaned up while everyone was disconnected).
+    return send(client.ws, { type: 'noRoom', room: code });
   }
 
   // Leave any previous room first (e.g. switching rooms on one connection).
@@ -388,10 +393,13 @@ function doJoin(client, code, playerId) {
 
   client.playerId = playerId || client.playerId || genId();
 
-  // Try to reclaim a seat this player already owns (reconnect); otherwise
-  // take an open seat; otherwise spectate.
+  // Try to reclaim a seat this player already owns (reconnect); otherwise take
+  // a preferred (previously-held) colour if free; otherwise any open seat.
   var color = seatColorForPlayer(room, client.playerId);
   var reconnected = !!color;
+  if (!color && (preferredColor === 'w' || preferredColor === 'b') && !room.seats[preferredColor]) {
+    color = preferredColor;
+  }
   if (!color) color = openColor(room);
 
   client.room = room;
@@ -443,6 +451,42 @@ function doJoin(client, code, playerId) {
 
 var SQUARE_RE = /^[a-h][1-8]$/;
 var PROMO_RE = /^[qrbn]$/;
+
+// Re-seed a room from a client's saved game state when the server no longer
+// has it (after a restart, or cleanup while everyone was disconnected). The
+// first player back recreates the room; the other simply rejoins it normally.
+function doRestore(client, msg) {
+  var code = String(msg.room || '').toUpperCase().trim();
+  if (!/^[A-F0-9]{6}$/.test(code)) {
+    return send(client.ws, { type: 'error', message: 'Cannot restore: bad room code' });
+  }
+  var preferred = (msg.color === 'w' || msg.color === 'b') ? msg.color : null;
+
+  if (!rooms[code]) {
+    var game = new Chess();
+    try {
+      if (msg.state) game.load(msg.state);
+    } catch (e) {
+      game = new Chess(); // fall back to a fresh game if the snapshot is bad
+    }
+    var st = game.status();
+    rooms[code] = {
+      code: code,
+      game: game,
+      players: { w: null, b: null },
+      seats: { w: null, b: null },
+      disconnectTimers: { w: null, b: null },
+      spectators: [],
+      gameOver: st.over ? { result: st.result, reason: st.reason } : null,
+      drawOffer: null,
+      rematchVotes: {},
+      updatedAt: Date.now()
+    };
+  }
+  // Seat the player into their previous colour (if free) and send them the
+  // authoritative current room state.
+  doJoin(client, code, msg.playerId, preferred);
+}
 
 function doMove(client, msg) {
   var room = client.room;
