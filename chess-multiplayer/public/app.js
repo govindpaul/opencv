@@ -30,6 +30,11 @@
   var playerId = null;
   try { playerId = sessionStorage.getItem('chessPlayerId') || null; } catch (e) {}
   var keepaliveTimer = null;
+  // Reconnect backoff (Render and most hosts recommend exponential backoff so
+  // a brief outage / deploy does not get hammered with reconnect attempts).
+  var RECONNECT_BASE = 1000;
+  var RECONNECT_MAX = 20000;
+  var reconnectDelay = RECONNECT_BASE;
   var status = null;        // last status from server
   var lastMove = null;      // { from, to }
   var selected = null;      // currently selected square
@@ -48,6 +53,7 @@
     ws.onopen = function () {
       connEl.textContent = 'connected';
       connEl.className = 'conn-status open';
+      reconnectDelay = RECONNECT_BASE; // reset backoff on a successful connect
       startKeepalive();
       // Auto-(re)join room from URL hash (e.g. #ABC123) if present. On a
       // reconnect this reclaims our seat via the stored playerId.
@@ -60,7 +66,11 @@
       connEl.textContent = 'reconnecting…';
       connEl.className = 'conn-status closed';
       stopKeepalive();
-      setTimeout(connect, 1500);
+      // Exponential backoff with jitter, capped, so repeated failures (e.g. a
+      // redeploy) don't hammer the server.
+      var delay = reconnectDelay + Math.floor(Math.random() * 0.3 * reconnectDelay);
+      reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_MAX);
+      setTimeout(connect, delay);
     };
     ws.onerror = function () {
       // Let onclose handle the retry; just avoid an unhandled error.
