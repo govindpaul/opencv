@@ -685,8 +685,19 @@
       if (history[i + 1]) list.appendChild(sanCell(i + 1));
       else list.appendChild(document.createElement('div'));
     }
+    scrollMoveListToActive();
+  }
+
+  // Scroll ONLY the move-list box to reveal the active move. Using
+  // Element.scrollIntoView() here would also scroll the page/window, which on
+  // mobile (where the move list sits below the board) yanks the whole page
+  // down on every move. We adjust the container's scrollTop instead.
+  function scrollMoveListToActive() {
+    var list = $('moveList');
     var active = list.querySelector('.san.active');
-    if (active) active.scrollIntoView({ block: 'nearest' });
+    if (!active) return;
+    var target = active.offsetTop - (list.clientHeight - active.offsetHeight) / 2;
+    list.scrollTop = Math.max(0, target);
   }
   function sanCell(idx) {
     var d = document.createElement('div');

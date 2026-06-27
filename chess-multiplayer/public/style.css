@@ -232,6 +232,7 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 .moves-box h3, .chat-box h3 { margin: 0; font-size: 0.8rem; text-transform: uppercase; color: var(--muted); letter-spacing: 1px; }
 .nav-btns { display: flex; gap: 3px; }
 .move-list {
+  position: relative;
   max-height: 180px; overflow-y: auto; font-family: "SFMono-Regular", Consolas, monospace;
   font-size: 0.86rem; line-height: 1.7; display: grid; grid-template-columns: 2.2em 1fr 1fr; gap: 1px 4px;
 }
