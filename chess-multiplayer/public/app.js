@@ -47,30 +47,90 @@
   function isOver() { return !!(status && status.over); }
 
   // ---- WebSocket ----
+  // Mobile browsers suspend background tabs: the socket dies and a fresh one
+  // can hang in CONNECTING forever (no onopen/onclose). So we use a connection
+  // watchdog, force a reconnect whenever the page becomes visible/online, and
+  // health-check a seemingly-open socket with a ping that must be answered.
+  var reconnectTimer = null, connectGuard = null, healthTimer = null;
+  var lastPongAt = 0;
+
   function connect() {
+    clearTimeout(reconnectTimer); reconnectTimer = null;
+    clearTimeout(connectGuard);
+
+    // Detach and discard any previous socket so its handlers can't interfere.
+    if (ws) {
+      try { ws.onopen = ws.onclose = ws.onerror = ws.onmessage = null; ws.close(); } catch (e) {}
+    }
+
     var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     ws = new WebSocket(proto + '//' + location.host);
+    var sock = ws;
 
-    ws.onopen = function () {
+    // Watchdog: if it doesn't open within 8s, kill it and retry (handles the
+    // "stuck connecting forever" case after a mobile resume).
+    connectGuard = setTimeout(function () {
+      if (sock.readyState !== WebSocket.OPEN) { try { sock.close(); } catch (e) {} }
+    }, 8000);
+
+    sock.onopen = function () {
+      if (sock !== ws) return;
+      clearTimeout(connectGuard);
       connEl.textContent = 'connected';
       connEl.className = 'conn-status open';
       reconnectDelay = RECONNECT_BASE;
+      lastPongAt = Date.now();
       startKeepalive();
       var hash = location.hash.replace('#', '').trim();
       if (hash) send({ type: 'join', room: hash.toUpperCase(), playerId: playerId });
     };
-    ws.onclose = function () {
+    sock.onclose = function () {
+      if (sock !== ws) return;
+      clearTimeout(connectGuard);
       connEl.textContent = 'reconnecting…';
       connEl.className = 'conn-status closed';
       stopKeepalive();
-      var delay = reconnectDelay + Math.floor(Math.random() * 0.3 * reconnectDelay);
-      reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_MAX);
-      setTimeout(connect, delay);
+      scheduleReconnect();
     };
-    ws.onerror = function () { try { ws.close(); } catch (e) {} };
-    ws.onmessage = function (ev) { handle(JSON.parse(ev.data)); };
+    sock.onerror = function () { try { sock.close(); } catch (e) {} };
+    sock.onmessage = function (ev) {
+      try { handle(JSON.parse(ev.data)); } catch (e) {}
+    };
   }
-  function send(msg) { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg)); }
+
+  function scheduleReconnect() {
+    clearTimeout(reconnectTimer);
+    var delay = reconnectDelay + Math.floor(Math.random() * 0.3 * reconnectDelay);
+    reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_MAX);
+    reconnectTimer = setTimeout(connect, delay);
+  }
+
+  // Called when the page regains focus / visibility / network. Forces a quick
+  // reconnect if the socket is gone, and verifies a live-looking socket.
+  function ensureConnected() {
+    if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+      reconnectDelay = RECONNECT_BASE;
+      connect();
+      return;
+    }
+    if (ws.readyState === WebSocket.CONNECTING) return; // watchdog will handle
+    // OPEN: it may be a zombie after resume — ping and require a pong back.
+    var before = lastPongAt;
+    send({ type: 'ping' });
+    clearTimeout(healthTimer);
+    healthTimer = setTimeout(function () {
+      if (lastPongAt === before) { // no pong → dead socket, force reconnect
+        reconnectDelay = RECONNECT_BASE;
+        connect();
+      }
+    }, 3000);
+  }
+
+  function send(msg) {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      try { ws.send(JSON.stringify(msg)); } catch (e) {}
+    }
+  }
   function startKeepalive() {
     stopKeepalive();
     send({ type: 'ping' }); // prove liveness immediately on (re)connect
@@ -126,6 +186,7 @@
         addChat(msg.from, msg.text);
         break;
       case 'pong':
+        lastPongAt = Date.now();
         break;
       case 'error':
         flashError(msg.message);
@@ -822,6 +883,15 @@
     boardEl.addEventListener('pointerdown', onPointerDown);
     window.addEventListener('pointermove', onPointerMove);
     window.addEventListener('pointerup', onPointerUp);
+
+    // Reconnect promptly when the user returns to the tab (the #1 cause of
+    // "stuck reconnecting" on mobile is the browser suspending the page).
+    document.addEventListener('visibilitychange', function () {
+      if (document.visibilityState === 'visible') ensureConnected();
+    });
+    window.addEventListener('focus', ensureConnected);
+    window.addEventListener('pageshow', ensureConnected);
+    window.addEventListener('online', ensureConnected);
 
     connect();
   }

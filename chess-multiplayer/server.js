@@ -47,8 +47,9 @@ var PUBLIC_DIR = path.join(__dirname, 'public');
 var SRC_DIR = path.join(__dirname, 'src');
 
 // How long a player's seat is held open after a disconnect, allowing a
-// reconnect to reclaim it before the seat is freed.
-var DISCONNECT_GRACE_MS = 60 * 1000;
+// reconnect to reclaim it before the seat is freed. Generous, because mobile
+// users often background the tab / lock the phone for a while mid-game.
+var DISCONNECT_GRACE_MS = 3 * 60 * 1000;
 // Liveness sweep interval. The client sends an app-level ping every ~10s, so
 // a generous 30s window means several pings land between sweeps and a healthy
 // socket is never terminated by mistake. (Configurable for tests.)
