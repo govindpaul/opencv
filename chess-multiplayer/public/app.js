@@ -105,25 +105,23 @@
     reconnectTimer = setTimeout(connect, delay);
   }
 
-  // Called when the page regains focus / visibility / network. Forces a quick
-  // reconnect if the socket is gone, and verifies a live-looking socket.
+  // Called when the page regains focus / visibility / network.
+  //
+  // The hard part (per real mobile behaviour): after a tab is backgrounded or
+  // the phone is locked, the WebSocket often reports readyState === OPEN but is
+  // actually dead — .send() silently does nothing, so it looks "connected" yet
+  // moves never reach the server. We therefore do NOT trust readyState: if we
+  // haven't seen a pong very recently (keepalive is frozen while backgrounded),
+  // we tear the socket down and reconnect fresh.
+  var STALE_MS = 12000;
+  function isHealthy() {
+    return ws && ws.readyState === WebSocket.OPEN && (Date.now() - lastPongAt < STALE_MS);
+  }
   function ensureConnected() {
-    if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
-      reconnectDelay = RECONNECT_BASE;
-      connect();
-      return;
-    }
-    if (ws.readyState === WebSocket.CONNECTING) return; // watchdog will handle
-    // OPEN: it may be a zombie after resume — ping and require a pong back.
-    var before = lastPongAt;
-    send({ type: 'ping' });
-    clearTimeout(healthTimer);
-    healthTimer = setTimeout(function () {
-      if (lastPongAt === before) { // no pong → dead socket, force reconnect
-        reconnectDelay = RECONNECT_BASE;
-        connect();
-      }
-    }, 3000);
+    if (ws && ws.readyState === WebSocket.CONNECTING) return; // already connecting
+    if (isHealthy()) { send({ type: 'ping' }); return; }     // refresh liveness
+    reconnectDelay = RECONNECT_BASE;
+    connect();                                                // force a fresh socket
   }
 
   function send(msg) {
@@ -421,6 +419,9 @@
     var moves = liveGame.movesFrom(from).filter(function (m) { return m.to === to; });
     if (!moves.length) return false;
     if (moves[0].promotion) { openPromotion(from, to); return true; }
+    // If the socket is a post-resume zombie, a plain send() would silently
+    // vanish. Reconnect first and ask the user to retry rather than losing it.
+    if (!isHealthy()) { ensureConnected(); showToast('Reconnecting — tap your move again', 'info'); return true; }
     send({ type: 'move', from: from, to: to });
     clearSelection();
     render();
@@ -892,6 +893,15 @@
     window.addEventListener('focus', ensureConnected);
     window.addEventListener('pageshow', ensureConnected);
     window.addEventListener('online', ensureConnected);
+    // Proactively drop the socket when the page is frozen / put in bfcache, so
+    // we never come back to a "zombie" socket that looks open but is dead.
+    function closeForBackground() {
+      stopKeepalive();
+      try { if (ws) { ws.onclose = null; ws.close(); } } catch (e) {}
+    }
+    window.addEventListener('pagehide', closeForBackground);
+    document.addEventListener('freeze', closeForBackground);
+    document.addEventListener('resume', ensureConnected);
 
     connect();
   }
