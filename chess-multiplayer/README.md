@@ -40,6 +40,47 @@ same network):
 
 Set a custom port with `PORT=8080 npm start`.
 
+## Deploy to free public hosting
+
+This app is a **stateful WebSocket server**, so it needs a host that supports
+long-lived connections and a persistent process. Vercel/Netlify's free
+serverless tiers do **not** (no persistent WebSockets), so use one of the
+hosts below. All read the `PORT` env var and serve the game over a single
+HTTPS/WSS port automatically.
+
+### Render (recommended, free, one click)
+
+This repo ships a Render Blueprint (`render.yaml`). To deploy:
+
+1. Open <https://dashboard.render.com/blueprints> → **New Blueprint Instance**.
+2. Connect this GitHub repo and pick the branch
+   `claude/multiplayer-web-chess-3oua9t`.
+3. Render reads `render.yaml`, builds, and gives you a public URL like
+   `https://multiplayer-chess.onrender.com`.
+
+Or one-click with the deploy button (after pushing the branch):
+
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy)
+
+> Render's free web services spin down after ~15 min of inactivity and take a
+> few seconds to wake on the next visit — fine for casual play.
+
+### Railway / Fly.io / any container host
+
+A `Dockerfile` is included, so you can deploy the `chess-multiplayer/`
+directory to any container platform:
+
+- **Railway**: New Project → Deploy from GitHub repo → set root directory to
+  `chess-multiplayer`. It auto-detects the Dockerfile.
+- **Fly.io**: `cd chess-multiplayer && fly launch` (uses the Dockerfile).
+
+### Manual web service (any Node host)
+
+- Build command: `npm install`
+- Start command: `npm start`
+- Root directory: `chess-multiplayer`
+- Node version: 18+
+
 ## Running the tests
 
 The chess engine has a standalone test suite covering move generation,
