@@ -73,7 +73,8 @@
   function send(msg) { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg)); }
   function startKeepalive() {
     stopKeepalive();
-    keepaliveTimer = setInterval(function () { send({ type: 'ping' }); }, 20000);
+    send({ type: 'ping' }); // prove liveness immediately on (re)connect
+    keepaliveTimer = setInterval(function () { send({ type: 'ping' }); }, 10000);
   }
   function stopKeepalive() { if (keepaliveTimer) { clearInterval(keepaliveTimer); keepaliveTimer = null; } }
 
@@ -107,10 +108,10 @@
         players = msg.players;
         updatePlayerBars();
         updateStatusMessage();
-        if (msg.event === 'left') addChat('system', 'Opponent left the game.');
-        else if (msg.event === 'joined') { addChat('system', 'A player joined.'); Sound.play('notify'); }
-        else if (msg.event === 'disconnected') addChat('system', 'Opponent disconnected — waiting for them to reconnect…');
-        else if (msg.event === 'reconnected') addChat('system', 'Opponent reconnected.');
+        if (msg.event === 'left') { addChat('system', 'Opponent left the game.'); showToast('Opponent left the game', 'info'); }
+        else if (msg.event === 'joined') { addChat('system', 'A player joined.'); showToast('Your opponent joined — game on!', 'info'); Sound.play('notify'); }
+        else if (msg.event === 'disconnected') { addChat('system', 'Opponent disconnected — waiting for them to reconnect…'); showToast('Opponent disconnected — waiting…', 'info'); }
+        else if (msg.event === 'reconnected') { addChat('system', 'Opponent reconnected.'); showToast('Opponent reconnected', 'info'); }
         break;
       case 'drawOffer':
         drawOfferFrom = msg.from;
@@ -144,16 +145,25 @@
 
     // A real new move (not a full resync) → sound + animation, auto-advance.
     if (lastMove && history.length === prevLen + 1) {
-      animating = { from: lastMove.from, to: lastMove.to };
-      playMoveSound(history[history.length - 1]);
+      var rec = history[history.length - 1];
+      var cap = null;
+      if (rec.capture) {
+        var prevBoard = boardAtPly(history.length - 1); // board before this move
+        var capSq = rec.enPassant ? (rec.to[0] + rec.from[1]) : rec.to;
+        var crc = ChessEngine.squareToRC(capSq);
+        var victim = prevBoard[crc.r][crc.c];
+        if (victim) cap = { sq: capSq, piece: victim, by: rec.color };
+      }
+      animating = { from: rec.from, to: rec.to, capture: cap };
+      playMoveSound(rec);
       highlights = {}; arrows = []; // clear annotations on a new move
     }
     if (wasAtLive || history.length <= prevLen) viewPly = history.length;
     else viewPly = Math.min(viewPly, history.length);
 
+    updatePlayerBars();   // refresh trays before the capture animation runs
     render();
     updateStatusMessage();
-    updatePlayerBars();
     rebuildMoveList();
     updateNavButtons();
 
@@ -249,8 +259,35 @@
     return null;
   }
 
-  // Animate the moved piece sliding from its origin square to its target.
+  // Animate the moved piece sliding from its origin to its target, and (on a
+  // capture) make the captured piece dramatically vanish so the player whose
+  // piece was taken clearly sees it happen.
   function runAnimation(mv) {
+    // Capture feedback first (so it's visible even if the slide is skipped).
+    if (mv.capture) {
+      var capCell = boardEl.querySelector('[data-square="' + mv.capture.sq + '"]');
+      if (capCell) {
+        var flash = document.createElement('div');
+        flash.className = 'capture-flash';
+        capCell.appendChild(flash);
+        setTimeout(function () { flash.remove(); }, 420);
+
+        var ghost = document.createElement('div');
+        ghost.className = 'capture-ghost';
+        ghost.innerHTML = PIECES[mv.capture.piece.color][mv.capture.piece.type];
+        capCell.appendChild(ghost);
+        setTimeout(function () { ghost.remove(); }, 360);
+      }
+      // Pop the captured piece into the correct tray.
+      var trayId = mv.capture.by === perspective() ? 'capturedBySelf' : 'capturedByOpponent';
+      var caps = $(trayId).querySelectorAll('.cap');
+      if (caps.length) {
+        var lastCap = caps[caps.length - 1];
+        lastCap.classList.add('pop');
+        setTimeout(function () { lastCap.classList.remove('pop'); }, 420);
+      }
+    }
+
     var fromCell = boardEl.querySelector('[data-square="' + mv.from + '"]');
     var toCell = boardEl.querySelector('[data-square="' + mv.to + '"]');
     if (!toCell) return;
@@ -262,7 +299,7 @@
     pe.style.transform = 'translate(' + dx + 'px,' + dy + 'px)';
     requestAnimationFrame(function () {
       requestAnimationFrame(function () {
-        pe.style.transition = 'transform 0.15s ease-out';
+        pe.style.transition = 'transform 0.16s ease-out';
         pe.style.transform = 'translate(0,0)';
       });
     });
@@ -632,7 +669,12 @@
   }
   function hideResult() { $('resultModal').classList.add('hidden'); }
 
-  // ---- Chat ----
+  // ---- Chat + notifications ----
+  var unreadChat = 0;
+  var toastContainer = null;
+
+  function selfLabel() { return myColor === 'w' ? 'White' : myColor === 'b' ? 'Black' : 'Spectator'; }
+
   function addChat(from, text) {
     var log = $('chatLog');
     var div = document.createElement('div');
@@ -645,6 +687,49 @@
     }
     log.appendChild(div);
     log.scrollTop = log.scrollHeight;
+
+    // Notify on a message from someone else (so the other player notices it
+    // even when the chat panel is scrolled out of view, e.g. on mobile).
+    if (from !== 'system' && from !== selfLabel()) {
+      unreadChat++;
+      updateChatBadge();
+      flashChatHeader();
+      showToast('💬 ' + from + ': ' + text);
+      Sound.play('notify');
+    }
+  }
+
+  function updateChatBadge() {
+    var badge = $('chatBadge');
+    if (unreadChat > 0) { badge.textContent = unreadChat; badge.classList.remove('hidden'); }
+    else badge.classList.add('hidden');
+  }
+  function flashChatHeader() {
+    var h = $('chatBox').querySelector('h3');
+    h.classList.remove('flash'); void h.offsetWidth; h.classList.add('flash');
+  }
+  function clearUnread() { unreadChat = 0; updateChatBadge(); }
+  function focusChat() {
+    $('chatBox').scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    var input = $('chatInput');
+    input.focus({ preventScroll: true });
+    clearUnread();
+  }
+
+  function showToast(text, kind) {
+    if (!toastContainer) return;
+    var t = document.createElement('div');
+    t.className = 'toast' + (kind ? ' ' + kind : '');
+    t.textContent = text;
+    t.addEventListener('click', function () { focusChat(); dismiss(); });
+    toastContainer.appendChild(t);
+    requestAnimationFrame(function () { t.classList.add('show'); });
+    var killer = setTimeout(dismiss, 4500);
+    function dismiss() {
+      clearTimeout(killer);
+      t.classList.remove('show');
+      setTimeout(function () { if (t.parentNode) t.remove(); }, 300);
+    }
   }
   function flashError(message) {
     if (lobbyEl && !lobbyEl.classList.contains('hidden')) {
@@ -693,7 +778,18 @@
       var text = $('chatInput').value;
       if (text.trim()) send({ type: 'chat', text: text });
       $('chatInput').value = '';
+      clearUnread();
     });
+    $('chatInput').addEventListener('focus', clearUnread);
+    $('chatLog').addEventListener('scroll', function () {
+      var el = $('chatLog');
+      if (el.scrollTop + el.clientHeight >= el.scrollHeight - 8) clearUnread();
+    });
+
+    // Toast container for notifications.
+    toastContainer = document.createElement('div');
+    toastContainer.className = 'toast-container';
+    document.body.appendChild(toastContainer);
 
     // Sound toggle.
     var sb = $('soundBtn');

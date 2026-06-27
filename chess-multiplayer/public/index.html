@@ -10,7 +10,7 @@
 <body>
   <div id="app">
     <header class="topbar">
-      <h1>♞ Chess</h1>
+      <h1>♞ Chess <span class="ver">v2</span></h1>
       <div class="top-right">
         <button id="soundBtn" class="icon-btn" title="Toggle sound">🔊</button>
         <div id="connection" class="conn-status">connecting…</div>
@@ -112,8 +112,8 @@
             </div>
           </div>
 
-          <div class="chat-box">
-            <h3>Chat</h3>
+          <div class="chat-box" id="chatBox">
+            <h3>Chat <span id="chatBadge" class="badge hidden">0</span></h3>
             <div id="chatLog" class="chat-log"></div>
             <form id="chatForm" class="chat-form">
               <input id="chatInput" placeholder="Say something…" maxlength="300" autocomplete="off" />

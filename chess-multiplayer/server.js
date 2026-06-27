@@ -49,8 +49,10 @@ var SRC_DIR = path.join(__dirname, 'src');
 // How long a player's seat is held open after a disconnect, allowing a
 // reconnect to reclaim it before the seat is freed.
 var DISCONNECT_GRACE_MS = 60 * 1000;
-// Heartbeat interval; well under typical proxy idle timeouts (~55-120s).
-var HEARTBEAT_MS = 25 * 1000;
+// Liveness sweep interval. The client sends an app-level ping every ~10s, so
+// a generous 30s window means several pings land between sweeps and a healthy
+// socket is never terminated by mistake. (Configurable for tests.)
+var HEARTBEAT_MS = parseInt(process.env.CHESS_HEARTBEAT_MS, 10) || 30 * 1000;
 
 var MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -302,6 +304,13 @@ wss.on('connection', function (ws) {
   ws.on('pong', function () { ws.isAlive = true; });
 
   ws.on('message', function (raw) {
+    // ANY inbound traffic proves the connection is alive. This is the key
+    // robustness fix: some proxies (incl. Render's) may not forward WebSocket
+    // ping/pong control frames, which would make a pong-only heartbeat
+    // wrongly terminate healthy connections. Application data frames always
+    // traverse the proxy, so the client's frequent app-level 'ping' keeps the
+    // socket marked alive regardless of control-frame handling.
+    ws.isAlive = true;
     var msg;
     try {
       msg = JSON.parse(raw);
