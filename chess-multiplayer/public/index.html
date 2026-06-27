@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Multiplayer Chess</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <div id="app">
+    <header class="topbar">
+      <h1>♞ Multiplayer Chess</h1>
+      <div id="connection" class="conn-status">connecting…</div>
+    </header>
+
+    <!-- Lobby -->
+    <section id="lobby" class="panel">
+      <h2>Play a friend</h2>
+      <p class="muted">Create a game and share the room code, or join an existing one.</p>
+      <div class="lobby-actions">
+        <button id="createBtn" class="primary">Create new game</button>
+        <div class="join-row">
+          <input id="roomInput" maxlength="6" placeholder="ROOM CODE" autocomplete="off" />
+          <button id="joinBtn">Join</button>
+        </div>
+      </div>
+      <p id="lobbyError" class="error"></p>
+    </section>
+
+    <!-- Game -->
+    <section id="game" class="hidden">
+      <div class="game-layout">
+        <div class="board-area">
+          <div id="opponentBar" class="player-bar">
+            <span class="who">Opponent</span>
+            <span id="opponentStatus" class="dot"></span>
+          </div>
+          <div id="boardWrap">
+            <div id="board"></div>
+            <div id="promotion" class="promotion hidden"></div>
+          </div>
+          <div id="selfBar" class="player-bar">
+            <span class="who">You</span>
+            <span id="selfStatus" class="dot online"></span>
+          </div>
+        </div>
+
+        <aside class="sidebar">
+          <div class="room-info">
+            <div>Room: <strong id="roomCode">—</strong>
+              <button id="copyBtn" class="tiny" title="Copy room code">copy</button>
+            </div>
+            <div>You play: <strong id="myColor">—</strong></div>
+          </div>
+
+          <div id="statusMsg" class="status-msg">Waiting…</div>
+
+          <div class="moves-box">
+            <h3>Moves</h3>
+            <ol id="moveList" class="move-list"></ol>
+          </div>
+
+          <div class="controls">
+            <button id="resignBtn">Resign</button>
+            <button id="rematchBtn" class="hidden">Rematch</button>
+            <button id="leaveBtn">Leave</button>
+          </div>
+
+          <div class="chat-box">
+            <h3>Chat</h3>
+            <div id="chatLog" class="chat-log"></div>
+            <form id="chatForm" class="chat-form">
+              <input id="chatInput" placeholder="Say something…" maxlength="300" autocomplete="off" />
+              <button type="submit">Send</button>
+            </form>
+          </div>
+        </aside>
+      </div>
+    </section>
+  </div>
+
+  <script src="/src/chess-engine.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>
