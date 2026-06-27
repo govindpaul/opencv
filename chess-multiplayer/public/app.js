@@ -57,6 +57,7 @@
   function connect() {
     clearTimeout(reconnectTimer); reconnectTimer = null;
     clearTimeout(connectGuard);
+    stopKeepalive(); // avoid the watchdog re-entering connect() while we reconnect
 
     // Detach and discard any previous socket so its handlers can't interfere.
     if (ws) {
@@ -129,10 +130,29 @@
       try { ws.send(JSON.stringify(msg)); } catch (e) {}
     }
   }
+  // Keepalive doubles as a continuous watchdog. Every tick we ping the server;
+  // if no pong has come back for PONG_TIMEOUT (the socket silently died — a
+  // foreground mobile NAT/carrier drop, or the server closed it without the
+  // close reaching us), we declare it dead and reconnect. This is what catches
+  // the "connected but can't move after a minute" case where no visibility
+  // event ever fires to trigger ensureConnected().
+  var KEEPALIVE_MS = (typeof window !== 'undefined' && window.__chessKA) || 8000;
+  var PONG_TIMEOUT = (typeof window !== 'undefined' && window.__chessPongTO) || 24000;
   function startKeepalive() {
     stopKeepalive();
+    lastPongAt = Date.now();
     send({ type: 'ping' }); // prove liveness immediately on (re)connect
-    keepaliveTimer = setInterval(function () { send({ type: 'ping' }); }, 10000);
+    keepaliveTimer = setInterval(function () {
+      if (Date.now() - lastPongAt > PONG_TIMEOUT) {
+        // Zombie socket: looks open, isn't. Force a fresh connection.
+        connEl.textContent = 'reconnecting…';
+        connEl.className = 'conn-status closed';
+        reconnectDelay = RECONNECT_BASE;
+        connect();
+        return;
+      }
+      send({ type: 'ping' });
+    }, KEEPALIVE_MS);
   }
   function stopKeepalive() { if (keepaliveTimer) { clearInterval(keepaliveTimer); keepaliveTimer = null; } }
 
