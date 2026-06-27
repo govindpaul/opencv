@@ -127,9 +127,97 @@ function createRoom() {
     disconnectTimers: { w: null, b: null }, // grace-period timers
     spectators: [],
     gameOver: null,                         // { result, reason }
-    rematchVotes: {}
+    drawOffer: null,                        // color that has an open draw offer
+    rematchVotes: {},
+    updatedAt: Date.now()
   };
+  scheduleSave();
   return rooms[code];
+}
+
+// ---- Persistence --------------------------------------------------------
+//
+// Game state is snapshotted to a JSON file so a server restart / crash does
+// not lose in-progress games (players reconnect and reclaim their seats).
+//
+// NOTE: this requires a durable filesystem. Render's FREE tier has an
+// EPHEMERAL disk (wiped on every redeploy, restart and spin-down), so games
+// will NOT survive a redeploy there — that needs an external store (e.g.
+// Postgres/Redis) or a paid plan with a persistent disk. On a normal host,
+// a paid disk, or local/self-hosting this keeps games safe across restarts.
+
+var DATA_FILE = process.env.CHESS_DATA_FILE || path.join(__dirname, '.data', 'rooms.json');
+var ROOM_TTL_MS = 24 * 60 * 60 * 1000; // forget rooms untouched for 24h
+var saveTimer = null;
+
+function scheduleSave() {
+  if (saveTimer) return;
+  saveTimer = setTimeout(function () {
+    saveTimer = null;
+    persistNow();
+  }, 1000);
+}
+
+function persistNow() {
+  try {
+    var dump = [];
+    Object.keys(rooms).forEach(function (code) {
+      var r = rooms[code];
+      // Only persist rooms with an owned seat (i.e. a real game in progress).
+      if (!r.seats.w && !r.seats.b) return;
+      dump.push({
+        code: r.code,
+        game: r.game.getState(),
+        seats: r.seats,
+        gameOver: r.gameOver,
+        updatedAt: r.updatedAt || Date.now()
+      });
+    });
+    fs.mkdirSync(path.dirname(DATA_FILE), { recursive: true });
+    fs.writeFileSync(DATA_FILE, JSON.stringify(dump));
+  } catch (e) {
+    console.error('persist failed:', e && e.message);
+  }
+}
+
+function loadPersisted() {
+  var raw;
+  try {
+    raw = fs.readFileSync(DATA_FILE, 'utf8');
+  } catch (e) {
+    return; // no snapshot yet
+  }
+  var dump;
+  try {
+    dump = JSON.parse(raw);
+  } catch (e) {
+    console.error('corrupt persistence file, ignoring');
+    return;
+  }
+  var now = Date.now();
+  var restored = 0;
+  dump.forEach(function (d) {
+    if (!d || !d.code) return;
+    if (now - (d.updatedAt || 0) > ROOM_TTL_MS) return; // stale
+    try {
+      rooms[d.code] = {
+        code: d.code,
+        game: new Chess(d.game),
+        players: { w: null, b: null },
+        seats: d.seats || { w: null, b: null },
+        disconnectTimers: { w: null, b: null },
+        spectators: [],
+        gameOver: d.gameOver || null,
+        drawOffer: null,
+        rematchVotes: {},
+        updatedAt: d.updatedAt || now
+      };
+      restored++;
+    } catch (e) {
+      console.error('skip unrestorable room', d.code, e && e.message);
+    }
+  });
+  if (restored) console.log('restored ' + restored + ' game(s) from disk');
 }
 
 function publicPlayers(room) {
@@ -166,14 +254,17 @@ function statusOf(room) {
 }
 
 function broadcastState(room, lastMove) {
+  room.updatedAt = Date.now();
   var payload = {
     type: 'state',
     state: room.game.getState(),
     status: statusOf(room),
     players: publicPlayers(room),
-    lastMove: lastMove || null
+    lastMove: lastMove || null,
+    drawOffer: room.drawOffer || null
   };
   everyone(room).forEach(function (c) { send(c.ws, payload); });
+  scheduleSave();
 }
 
 // First seat with no reserved owner, or null if both are taken/reserved.
@@ -265,6 +356,8 @@ function handleMessage(client, msg) {
       return doRematch(client);
     case 'chat':
       return doChat(client, msg);
+    case 'draw':
+      return doDraw(client, msg);
     case 'ping':
       // Application-level keepalive (some proxies only reset their idle timer
       // on data frames, not WebSocket control frames).
@@ -324,7 +417,8 @@ function doJoin(client, code, playerId) {
     reconnected: reconnected,
     state: room.game.getState(),
     status: statusOf(room),
-    players: publicPlayers(room)
+    players: publicPlayers(room),
+    drawOffer: room.drawOffer || null
   });
 
   broadcast(room, {
@@ -332,6 +426,9 @@ function doJoin(client, code, playerId) {
     event: reconnected ? 'reconnected' : 'joined',
     players: publicPlayers(room)
   }, client);
+
+  room.updatedAt = Date.now();
+  scheduleSave();
 }
 
 var SQUARE_RE = /^[a-h][1-8]$/;
@@ -359,12 +456,43 @@ function doMove(client, msg) {
     return send(client.ws, { type: 'error', message: 'Illegal move' });
   }
 
+  // Any move withdraws an outstanding draw offer.
+  room.drawOffer = null;
+
   var status = room.game.status();
   if (status.over) {
     room.gameOver = { result: status.result, reason: status.reason };
   }
 
   broadcastState(room, record);
+}
+
+function doDraw(client, msg) {
+  var room = client.room;
+  if (!room || !client.color || room.gameOver) return;
+  if (!room.players.w || !room.players.b) return;
+  var action = msg.action;
+
+  if (action === 'offer') {
+    if (room.drawOffer) return; // an offer is already pending
+    room.drawOffer = client.color;
+    var label = client.color === 'w' ? 'White' : 'Black';
+    broadcast(room, { type: 'chat', from: 'system', text: label + ' offers a draw.' });
+    // Tell the opponent so they can show accept/decline.
+    var opp = client.color === 'w' ? room.players.b : room.players.w;
+    send(opp.ws, { type: 'drawOffer', from: client.color });
+  } else if (action === 'accept') {
+    // Only the side that did NOT offer can accept.
+    if (!room.drawOffer || room.drawOffer === client.color) return;
+    room.drawOffer = null;
+    room.gameOver = { result: 'draw', reason: 'agreement' };
+    broadcastState(room, null);
+  } else if (action === 'decline') {
+    if (!room.drawOffer || room.drawOffer === client.color) return;
+    room.drawOffer = null;
+    broadcast(room, { type: 'chat', from: 'system', text: 'Draw offer declined.' });
+    broadcast(room, { type: 'drawDeclined' });
+  }
 }
 
 function doResign(client) {
@@ -396,7 +524,9 @@ function doRematch(client) {
     room.seats.b = room.players.b ? { id: room.players.b.playerId } : null;
     room.game = new Chess();
     room.gameOver = null;
+    room.drawOffer = null;
     room.rematchVotes = {};
+    room.updatedAt = Date.now();
     everyone(room).forEach(function (c) {
       send(c.ws, {
         type: 'joined',
@@ -410,6 +540,7 @@ function doRematch(client) {
         players: publicPlayers(room)
       });
     });
+    scheduleSave();
   }
 }
 
@@ -442,6 +573,7 @@ function handleDisconnect(client) {
         delete room.rematchVotes[color];
         broadcast(room, { type: 'opponent', event: 'left', players: publicPlayers(room) });
         maybeCleanup(room);
+        scheduleSave();
       }
     }, DISCONNECT_GRACE_MS);
   } else {
@@ -462,6 +594,8 @@ process.on('uncaughtException', function (err) {
 process.on('unhandledRejection', function (reason) {
   console.error('unhandledRejection:', reason);
 });
+
+loadPersisted();
 
 server.listen(PORT, function () {
   console.log('Chess server running at http://localhost:' + PORT);

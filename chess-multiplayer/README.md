@@ -14,13 +14,37 @@ every move is validated server-side before it is broadcast.
 - **Server-authoritative validation** — the same chess engine runs on the
   server and in the browser. The client shows instant legal-move hints; the
   server independently validates every move, so a tampered client cannot cheat.
-- **Click-to-move and drag-and-drop**, with highlighted legal moves, last-move
-  and check indicators, and a promotion picker.
-- **Spectators** can watch any in-progress game.
-- **Move list** in algebraic notation, **in-game chat**, **resign** and
-  **rematch** (with automatic color swap).
+- **Crisp SVG pieces** (the open "Cburnett" set) that look sharp on desktop
+  and mobile.
+- **Click-to-move and drag-and-drop** (mouse + touch), with highlighted legal
+  moves, last-move and check indicators, smooth move animation, and a
+  promotion picker.
+- **Sound effects** (synthesized, no downloads) for moves, captures, check,
+  castling, promotion and game end — with a toggle.
+- **Captured-pieces tray and material advantage** (`+N`), like chess.com.
+- **Right-click arrows and square highlights** for analysis (green / red /
+  blue / yellow via Shift / Alt / Ctrl).
+- **Move-list navigation** — click any move, or use the ◀ ▶ buttons / arrow
+  keys, to review earlier positions; press **F** or the Flip button to flip
+  the board.
+- **Draw offers**, **resign**, a **game-over modal**, and **rematch** (with
+  automatic color swap).
+- **Spectators** can watch any in-progress game; **in-game chat**.
+- **Robust connections**: WebSocket heartbeat, exponential-backoff reconnect,
+  and a disconnect grace period so a brief network blip doesn't forfeit your
+  seat — you reconnect and reclaim your game.
+- **Persistence**: in-progress games are snapshotted to disk so a server
+  restart/crash doesn't lose them (see the note under Deploy).
 - Reconnect-friendly: the room code lives in the URL hash, so refreshing or
   sharing `…/#ROOMCODE` rejoins.
+
+### Keyboard shortcuts
+
+| Key | Action |
+|-----|--------|
+| ← / → | Previous / next move |
+| Home / End | Jump to start / latest |
+| F | Flip board |
 
 ## Quick start
 
@@ -94,12 +118,14 @@ npm test
 
 ```
 chess-multiplayer/
-├── server.js              # HTTP + WebSocket server, room & game management
+├── server.js              # HTTP + WebSocket server, rooms, persistence
 ├── src/chess-engine.js    # Shared chess rules engine (runs on server + client)
 ├── public/
 │   ├── index.html         # Lobby + game UI
 │   ├── style.css          # Styling
-│   └── app.js             # Client: board rendering, WS protocol, interaction
+│   ├── app.js             # Client: board, WS protocol, interaction
+│   ├── pieces.js          # Embedded SVG piece set (Cburnett)
+│   └── sounds.js          # Web Audio sound effects
 └── test/engine.test.js    # Engine unit tests
 ```
 
@@ -111,3 +137,22 @@ updates the state and broadcasts the new position (plus status: check / mate /
 draw) to both players and any spectators. The browser loads the very same
 engine module to render legal-move hints locally, which keeps the UI snappy
 without trusting the client for correctness.
+
+## Persistence and the Render free tier
+
+In-progress games are snapshotted to `chess-multiplayer/.data/rooms.json`
+(override with the `CHESS_DATA_FILE` env var) and reloaded on startup, so a
+server restart or crash doesn't lose games — players reconnect and reclaim
+their seats.
+
+**Important:** this needs a durable filesystem. Render's **free** tier has an
+**ephemeral** disk that is wiped on every redeploy, restart and spin-down, so
+games will *not* survive a redeploy there. Options for durable storage on
+Render free are an external database (e.g. Postgres/Redis) or a paid plan with
+a [persistent disk](https://render.com/docs/disks). On a normal host, a paid
+disk, or local/self-hosting, file persistence works as-is.
+
+## Credits
+
+Chess piece graphics are the **Cburnett** set (the set used by Wikipedia and
+lichess), distributed under a free license (GPL/BSD/CC-BY-SA).

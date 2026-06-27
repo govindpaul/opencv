@@ -2,15 +2,19 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="theme-color" content="#1f2227" />
   <title>Multiplayer Chess</title>
   <link rel="stylesheet" href="/style.css" />
 </head>
 <body>
   <div id="app">
     <header class="topbar">
-      <h1>♞ Multiplayer Chess</h1>
-      <div id="connection" class="conn-status">connecting…</div>
+      <h1>♞ Chess</h1>
+      <div class="top-right">
+        <button id="soundBtn" class="icon-btn" title="Toggle sound">🔊</button>
+        <div id="connection" class="conn-status">connecting…</div>
+      </div>
     </header>
 
     <!-- Lobby -->
@@ -19,6 +23,7 @@
       <p class="muted">Create a game and share the room code, or join an existing one.</p>
       <div class="lobby-actions">
         <button id="createBtn" class="primary">Create new game</button>
+        <div class="or">or</div>
         <div class="join-row">
           <input id="roomInput" maxlength="6" placeholder="ROOM CODE" autocomplete="off" />
           <button id="joinBtn">Join</button>
@@ -32,38 +37,79 @@
       <div class="game-layout">
         <div class="board-area">
           <div id="opponentBar" class="player-bar">
-            <span class="who">Opponent</span>
-            <span id="opponentStatus" class="dot"></span>
+            <div class="player-id">
+              <span id="opponentStatus" class="dot"></span>
+              <span class="who">Opponent</span>
+            </div>
+            <div id="capturedByOpponent" class="captured"></div>
           </div>
+
           <div id="boardWrap">
             <div id="board"></div>
+            <svg id="overlay" class="overlay" viewBox="0 0 8 8" preserveAspectRatio="none"></svg>
             <div id="promotion" class="promotion hidden"></div>
+            <div id="resultModal" class="result-modal hidden">
+              <div class="result-card">
+                <div id="resultTitle" class="result-title">—</div>
+                <div id="resultReason" class="result-reason"></div>
+                <div class="result-actions">
+                  <button id="modalRematchBtn" class="primary">Rematch</button>
+                  <button id="modalCloseBtn">Review board</button>
+                </div>
+              </div>
+            </div>
           </div>
+
           <div id="selfBar" class="player-bar">
-            <span class="who">You</span>
-            <span id="selfStatus" class="dot online"></span>
+            <div class="player-id">
+              <span id="selfStatus" class="dot online"></span>
+              <span class="who">You</span>
+            </div>
+            <div id="capturedBySelf" class="captured"></div>
           </div>
         </div>
 
         <aside class="sidebar">
           <div class="room-info">
-            <div>Room: <strong id="roomCode">—</strong>
-              <button id="copyBtn" class="tiny" title="Copy room code">copy</button>
+            <div class="room-line">
+              <span>Room <strong id="roomCode">—</strong></span>
+              <button id="copyBtn" class="tiny" title="Copy invite link">copy link</button>
             </div>
-            <div>You play: <strong id="myColor">—</strong></div>
+            <div class="room-line muted">Playing as <strong id="myColor">—</strong></div>
           </div>
 
           <div id="statusMsg" class="status-msg">Waiting…</div>
 
           <div class="moves-box">
-            <h3>Moves</h3>
-            <ol id="moveList" class="move-list"></ol>
+            <div class="moves-head">
+              <h3>Moves</h3>
+              <div class="nav-btns">
+                <button id="navStart" class="tiny" title="First move">⏮</button>
+                <button id="navPrev" class="tiny" title="Previous">◀</button>
+                <button id="navNext" class="tiny" title="Next">▶</button>
+                <button id="navEnd" class="tiny" title="Latest">⏭</button>
+              </div>
+            </div>
+            <div id="moveList" class="move-list"></div>
           </div>
 
           <div class="controls">
-            <button id="resignBtn">Resign</button>
-            <button id="rematchBtn" class="hidden">Rematch</button>
-            <button id="leaveBtn">Leave</button>
+            <button id="flipBtn" title="Flip board">⟳ Flip</button>
+            <button id="drawBtn">½ Draw</button>
+            <button id="resignBtn">⚑ Resign</button>
+          </div>
+          <div class="controls">
+            <button id="rematchBtn" class="hidden primary">Rematch</button>
+            <button id="leaveBtn">Leave game</button>
+          </div>
+
+          <!-- Incoming draw offer -->
+          <div id="drawOfferBox" class="draw-offer hidden">
+            <span>Opponent offers a draw.</span>
+            <div>
+              <button id="acceptDrawBtn" class="tiny primary">Accept</button>
+              <button id="declineDrawBtn" class="tiny">Decline</button>
+            </div>
           </div>
 
           <div class="chat-box">
@@ -79,6 +125,8 @@
     </section>
   </div>
 
+  <script src="/pieces.js"></script>
+  <script src="/sounds.js"></script>
   <script src="/src/chess-engine.js"></script>
   <script src="/app.js"></script>
 </body>
