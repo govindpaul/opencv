@@ -12,3 +12,11 @@ services:
     envVars:
       - key: NODE_VERSION
         value: "20"
+      # Optional: durable game persistence across restarts/redeploys via
+      # Upstash Redis (free). Create a database at https://upstash.com and set
+      # these in the Render dashboard (Environment tab). Without them the app
+      # falls back to a local file (wiped on Render free restarts).
+      - key: UPSTASH_REDIS_REST_URL
+        sync: false
+      - key: UPSTASH_REDIS_REST_TOKEN
+        sync: false

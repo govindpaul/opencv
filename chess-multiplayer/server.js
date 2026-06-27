@@ -140,87 +140,75 @@ function createRoom() {
 
 // ---- Persistence --------------------------------------------------------
 //
-// Game state is snapshotted to a JSON file so a server restart / crash does
-// not lose in-progress games (players reconnect and reclaim their seats).
-//
-// NOTE: this requires a durable filesystem. Render's FREE tier has an
-// EPHEMERAL disk (wiped on every redeploy, restart and spin-down), so games
-// will NOT survive a redeploy there — that needs an external store (e.g.
-// Postgres/Redis) or a paid plan with a persistent disk. On a normal host,
-// a paid disk, or local/self-hosting this keeps games safe across restarts.
+// In-progress games are snapshotted so a server restart / crash does not lose
+// them (players reconnect and reclaim their seats). The backend is pluggable
+// (see src/store.js):
+//   - Redis (Upstash REST) when UPSTASH_REDIS_REST_URL + _TOKEN are set —
+//     durable across restarts/redeploys even on hosts with an ephemeral disk
+//     such as Render free. THIS is what keeps rooms alive server-side there.
+//   - A local JSON file otherwise (good for local/self-hosting or a durable
+//     disk; on Render free the file is wiped on every restart).
 
 var DATA_FILE = process.env.CHESS_DATA_FILE || path.join(__dirname, '.data', 'rooms.json');
 var ROOM_TTL_MS = 24 * 60 * 60 * 1000; // forget rooms untouched for 24h
+var store = require('./src/store').createStore({ dataFile: DATA_FILE, ttlMs: ROOM_TTL_MS });
 var saveTimer = null;
+
+function buildDumps() {
+  var dump = [];
+  Object.keys(rooms).forEach(function (code) {
+    var r = rooms[code];
+    // Only persist rooms with an owned seat (i.e. a real game in progress).
+    if (!r.seats.w && !r.seats.b) return;
+    dump.push({
+      code: r.code,
+      game: r.game.getState(),
+      seats: r.seats,
+      gameOver: r.gameOver,
+      updatedAt: r.updatedAt || Date.now()
+    });
+  });
+  return dump;
+}
 
 function scheduleSave() {
   if (saveTimer) return;
   saveTimer = setTimeout(function () {
     saveTimer = null;
-    persistNow();
+    store.flush(buildDumps());
   }, 1000);
 }
 
-function persistNow() {
-  try {
-    var dump = [];
-    Object.keys(rooms).forEach(function (code) {
-      var r = rooms[code];
-      // Only persist rooms with an owned seat (i.e. a real game in progress).
-      if (!r.seats.w && !r.seats.b) return;
-      dump.push({
-        code: r.code,
-        game: r.game.getState(),
-        seats: r.seats,
-        gameOver: r.gameOver,
-        updatedAt: r.updatedAt || Date.now()
-      });
-    });
-    fs.mkdirSync(path.dirname(DATA_FILE), { recursive: true });
-    fs.writeFileSync(DATA_FILE, JSON.stringify(dump));
-  } catch (e) {
-    console.error('persist failed:', e && e.message);
-  }
-}
-
 function loadPersisted() {
-  var raw;
-  try {
-    raw = fs.readFileSync(DATA_FILE, 'utf8');
-  } catch (e) {
-    return; // no snapshot yet
-  }
-  var dump;
-  try {
-    dump = JSON.parse(raw);
-  } catch (e) {
-    console.error('corrupt persistence file, ignoring');
-    return;
-  }
-  var now = Date.now();
-  var restored = 0;
-  dump.forEach(function (d) {
-    if (!d || !d.code) return;
-    if (now - (d.updatedAt || 0) > ROOM_TTL_MS) return; // stale
-    try {
-      rooms[d.code] = {
-        code: d.code,
-        game: new Chess(d.game),
-        players: { w: null, b: null },
-        seats: d.seats || { w: null, b: null },
-        disconnectTimers: { w: null, b: null },
-        spectators: [],
-        gameOver: d.gameOver || null,
-        drawOffer: null,
-        rematchVotes: {},
-        updatedAt: d.updatedAt || now
-      };
-      restored++;
-    } catch (e) {
-      console.error('skip unrestorable room', d.code, e && e.message);
-    }
+  return store.loadAll().then(function (dump) {
+    var now = Date.now();
+    var restored = 0;
+    (dump || []).forEach(function (d) {
+      if (!d || !d.code) return;
+      if (now - (d.updatedAt || 0) > ROOM_TTL_MS) return; // stale
+      if (rooms[d.code]) return; // a live room was created since boot; keep it
+      try {
+        rooms[d.code] = {
+          code: d.code,
+          game: new Chess(d.game),
+          players: { w: null, b: null },
+          seats: d.seats || { w: null, b: null },
+          disconnectTimers: { w: null, b: null },
+          spectators: [],
+          gameOver: d.gameOver || null,
+          drawOffer: null,
+          rematchVotes: {},
+          updatedAt: d.updatedAt || now
+        };
+        restored++;
+      } catch (e) {
+        console.error('skip unrestorable room', d.code, e && e.message);
+      }
+    });
+    if (restored) console.log('restored ' + restored + ' game(s) from ' + store.name);
+  }).catch(function (e) {
+    console.error('loadPersisted failed:', e && e.message);
   });
-  if (restored) console.log('restored ' + restored + ' game(s) from disk');
 }
 
 function publicPlayers(room) {
@@ -649,8 +637,7 @@ process.on('unhandledRejection', function (reason) {
   console.error('unhandledRejection:', reason);
 });
 
-loadPersisted();
-
 server.listen(PORT, function () {
-  console.log('Chess server running at http://localhost:' + PORT);
+  console.log('Chess server running at http://localhost:' + PORT + ' (persistence: ' + store.name + ')');
+  loadPersisted();
 });

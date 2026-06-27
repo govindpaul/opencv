@@ -120,6 +120,7 @@ npm test
 chess-multiplayer/
 ├── server.js              # HTTP + WebSocket server, rooms, persistence
 ├── src/chess-engine.js    # Shared chess rules engine (runs on server + client)
+├── src/store.js           # Pluggable persistence (Upstash Redis or JSON file)
 ├── public/
 │   ├── index.html         # Lobby + game UI
 │   ├── style.css          # Styling
@@ -138,19 +139,40 @@ draw) to both players and any spectators. The browser loads the very same
 engine module to render legal-move hints locally, which keeps the UI snappy
 without trusting the client for correctness.
 
-## Persistence and the Render free tier
+## Persistence
 
-In-progress games are snapshotted to `chess-multiplayer/.data/rooms.json`
-(override with the `CHESS_DATA_FILE` env var) and reloaded on startup, so a
-server restart or crash doesn't lose games — players reconnect and reclaim
-their seats.
+In-progress games are snapshotted and reloaded on startup, so a server restart
+or crash doesn't lose them — players reconnect and reclaim their seats. The
+backend is chosen automatically:
 
-**Important:** this needs a durable filesystem. Render's **free** tier has an
-**ephemeral** disk that is wiped on every redeploy, restart and spin-down, so
-games will *not* survive a redeploy there. Options for durable storage on
-Render free are an external database (e.g. Postgres/Redis) or a paid plan with
-a [persistent disk](https://render.com/docs/disks). On a normal host, a paid
-disk, or local/self-hosting, file persistence works as-is.
+### Durable: Upstash Redis (recommended for Render free)
+
+Render's free tier has an **ephemeral disk** (wiped on every restart/redeploy),
+so a local file does **not** survive there. Point the app at a free
+[Upstash Redis](https://upstash.com) database and rooms persist across restarts
+server-side (it uses the Upstash REST API over `fetch` — no extra dependency,
+no always-on connection — and Redis key TTLs expire idle rooms):
+
+1. Create a free Redis database at <https://console.upstash.com>.
+2. Copy its **REST URL** and **REST token**.
+3. Set them as environment variables on your host:
+   - `UPSTASH_REDIS_REST_URL`
+   - `UPSTASH_REDIS_REST_TOKEN`
+
+   On Render: **Dashboard → your service → Environment → Add**, then redeploy.
+   On boot the log prints `persistence: redis`.
+
+> Even without this, the client keeps a local snapshot and **re-seeds the room
+> on the server** if it finds the room gone after a reconnect — so play
+> recovers either way. Upstash just makes it seamless (no re-seed needed) and
+> lets games survive even when both players are away.
+
+### File (default)
+
+Without those env vars, games are snapshotted to
+`chess-multiplayer/.data/rooms.json` (override with `CHESS_DATA_FILE`). Great
+for local/self-hosting or a host with a durable/persistent disk; on Render free
+the file is wiped on restarts (so use Upstash there).
 
 ## Credits
 
