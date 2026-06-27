@@ -25,6 +25,11 @@
   var game = null;          // ChessEngine instance mirroring server state
   var myColor = null;       // 'w' | 'b' | null (spectator)
   var roomCode = null;
+  // Stable per-tab identity so a reconnect can reclaim the same seat.
+  // sessionStorage is per-tab, so two tabs on one machine get distinct ids.
+  var playerId = null;
+  try { playerId = sessionStorage.getItem('chessPlayerId') || null; } catch (e) {}
+  var keepaliveTimer = null;
   var status = null;        // last status from server
   var lastMove = null;      // { from, to }
   var selected = null;      // currently selected square
@@ -43,16 +48,23 @@
     ws.onopen = function () {
       connEl.textContent = 'connected';
       connEl.className = 'conn-status open';
-      // Auto-join room from URL hash (e.g. #ABC123) if present.
+      startKeepalive();
+      // Auto-(re)join room from URL hash (e.g. #ABC123) if present. On a
+      // reconnect this reclaims our seat via the stored playerId.
       var hash = location.hash.replace('#', '').trim();
       if (hash) {
-        send({ type: 'join', room: hash.toUpperCase() });
+        send({ type: 'join', room: hash.toUpperCase(), playerId: playerId });
       }
     };
     ws.onclose = function () {
-      connEl.textContent = 'disconnected — retrying…';
+      connEl.textContent = 'reconnecting…';
       connEl.className = 'conn-status closed';
-      setTimeout(connect, 2000);
+      stopKeepalive();
+      setTimeout(connect, 1500);
+    };
+    ws.onerror = function () {
+      // Let onclose handle the retry; just avoid an unhandled error.
+      try { ws.close(); } catch (e) {}
     };
     ws.onmessage = function (ev) {
       var msg = JSON.parse(ev.data);
@@ -64,17 +76,36 @@
     if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
   }
 
+  // Application-level keepalive: keeps proxies from dropping an "idle"
+  // connection while a player is thinking, and surfaces a dead link quickly.
+  function startKeepalive() {
+    stopKeepalive();
+    keepaliveTimer = setInterval(function () {
+      send({ type: 'ping' });
+    }, 20000);
+  }
+  function stopKeepalive() {
+    if (keepaliveTimer) { clearInterval(keepaliveTimer); keepaliveTimer = null; }
+  }
+
   function handle(msg) {
     switch (msg.type) {
       case 'joined':
         roomCode = msg.room;
         myColor = msg.color;
         players = msg.players;
+        if (msg.playerId) {
+          playerId = msg.playerId;
+          try { sessionStorage.setItem('chessPlayerId', playerId); } catch (e) {}
+        }
         loadState(msg.state, msg.status);
         location.hash = roomCode;
         showGame();
-        if (msg.spectator) addChat('system', 'You are spectating.');
+        if (msg.reconnected) addChat('system', 'Reconnected to your game.');
+        else if (msg.spectator) addChat('system', 'You are spectating.');
         break;
+      case 'pong':
+        break; // keepalive acknowledgement
       case 'state':
         players = msg.players;
         lastMove = msg.lastMove ? { from: msg.lastMove.from, to: msg.lastMove.to } : null;
@@ -86,7 +117,9 @@
         updatePlayerBars();
         updateStatusMessage();
         if (msg.event === 'left') addChat('system', 'Opponent left the game.');
-        if (msg.event === 'joined') addChat('system', 'A player joined.');
+        else if (msg.event === 'joined') addChat('system', 'A player joined.');
+        else if (msg.event === 'disconnected') addChat('system', 'Opponent disconnected — waiting for them to reconnect…');
+        else if (msg.event === 'reconnected') addChat('system', 'Opponent reconnected.');
         break;
       case 'chat':
         addChat(msg.from, msg.text);
@@ -413,10 +446,10 @@
 
   // ---- Wire up controls ----
   function init() {
-    $('createBtn').addEventListener('click', function () { send({ type: 'create' }); });
+    $('createBtn').addEventListener('click', function () { send({ type: 'create', playerId: playerId }); });
     $('joinBtn').addEventListener('click', function () {
       var code = $('roomInput').value.trim().toUpperCase();
-      if (code) send({ type: 'join', room: code });
+      if (code) send({ type: 'join', room: code, playerId: playerId });
     });
     $('roomInput').addEventListener('keydown', function (e) {
       if (e.key === 'Enter') $('joinBtn').click();

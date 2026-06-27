@@ -8,18 +8,30 @@
  *     with the shared chess engine before being broadcast, so a tampered
  *     client cannot make an illegal move.
  *
+ * Connection robustness:
+ *   - A ping/pong heartbeat keeps connections alive through proxies (which
+ *     close "idle" WebSockets) and detects dead sockets.
+ *   - Players have a stable playerId, so a dropped client can reconnect and
+ *     reclaim its seat (and the live game) instead of becoming a spectator.
+ *   - A disconnect grace period means a brief network blip does not forfeit
+ *     a player's seat.
+ *
  * Protocol (JSON messages):
- *   client -> server: { type: 'create' }
- *                     { type: 'join', room }
+ *   client -> server: { type: 'create', playerId? }
+ *                     { type: 'join', room, playerId? }
  *                     { type: 'move', from, to, promotion }
  *                     { type: 'resign' }
  *                     { type: 'rematch' }
  *                     { type: 'chat', text }
- *   server -> client: { type: 'joined', room, color, state, players, spectator }
+ *                     { type: 'ping' }
+ *   server -> client: { type: 'joined', room, color, playerId, state, status,
+ *                       players, spectator, reconnected }
  *                     { type: 'state', state, status, players, lastMove }
  *                     { type: 'chat', from, text }
  *                     { type: 'error', message }
- *                     { type: 'opponent', event }   // 'left' | 'joined'
+ *                     { type: 'opponent', event, players }
+ *                       // event: 'joined' | 'left' | 'disconnected' | 'reconnected'
+ *                     { type: 'pong' }
  */
 'use strict';
 
@@ -33,6 +45,12 @@ var Chess = require('./src/chess-engine');
 var PORT = process.env.PORT || 3000;
 var PUBLIC_DIR = path.join(__dirname, 'public');
 var SRC_DIR = path.join(__dirname, 'src');
+
+// How long a player's seat is held open after a disconnect, allowing a
+// reconnect to reclaim it before the seat is freed.
+var DISCONNECT_GRACE_MS = 60 * 1000;
+// Heartbeat interval; well under typical proxy idle timeouts (~55-120s).
+var HEARTBEAT_MS = 25 * 1000;
 
 var MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -48,6 +66,13 @@ var MIME = {
 function serveStatic(req, res) {
   var urlPath = decodeURIComponent(req.url.split('?')[0]);
   if (urlPath === '/') urlPath = '/index.html';
+
+  // A small health endpoint (useful for uptime pings on free hosting).
+  if (urlPath === '/healthz') {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end('ok');
+    return;
+  }
 
   // The browser loads the shared engine from /src/chess-engine.js.
   var baseDir = urlPath.indexOf('/src/') === 0 ? __dirname : PUBLIC_DIR;
@@ -80,6 +105,10 @@ var wss = new WebSocket.Server({ server });
 
 var rooms = Object.create(null);
 
+function genId() {
+  return crypto.randomBytes(9).toString('hex');
+}
+
 function makeRoomCode() {
   var code;
   do {
@@ -93,18 +122,21 @@ function createRoom() {
   rooms[code] = {
     code: code,
     game: new Chess(),
-    players: { w: null, b: null }, // client objects
+    players: { w: null, b: null },          // live client objects (or null)
+    seats: { w: null, b: null },            // { id } — reserved owner of a seat
+    disconnectTimers: { w: null, b: null }, // grace-period timers
     spectators: [],
-    gameOver: null, // { result, reason }
+    gameOver: null,                         // { result, reason }
     rematchVotes: {}
   };
   return rooms[code];
 }
 
 function publicPlayers(room) {
+  // A seat counts as "present" only when a live client occupies it.
   return {
-    w: room.players.w ? true : false,
-    b: room.players.b ? true : false
+    w: !!room.players.w,
+    b: !!room.players.b
   };
 }
 
@@ -112,20 +144,6 @@ function send(ws, msg) {
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify(msg));
   }
-}
-
-function broadcastState(room, lastMove) {
-  var status = room.gameOver
-    ? { over: true, result: room.gameOver.result, reason: room.gameOver.reason }
-    : room.game.status();
-  var payload = {
-    type: 'state',
-    state: room.game.getState(),
-    status: status,
-    players: publicPlayers(room),
-    lastMove: lastMove || null
-  };
-  everyone(room).forEach(function (c) { send(c.ws, payload); });
 }
 
 function everyone(room) {
@@ -141,16 +159,56 @@ function broadcast(room, msg, except) {
   });
 }
 
-function assignColor(room) {
-  if (!room.players.w) return 'w';
-  if (!room.players.b) return 'b';
-  return null; // spectator
+function statusOf(room) {
+  return room.gameOver
+    ? { over: true, result: room.gameOver.result, reason: room.gameOver.reason }
+    : room.game.status();
+}
+
+function broadcastState(room, lastMove) {
+  var payload = {
+    type: 'state',
+    state: room.game.getState(),
+    status: statusOf(room),
+    players: publicPlayers(room),
+    lastMove: lastMove || null
+  };
+  everyone(room).forEach(function (c) { send(c.ws, payload); });
+}
+
+// First seat with no reserved owner, or null if both are taken/reserved.
+function openColor(room) {
+  if (!room.seats.w) return 'w';
+  if (!room.seats.b) return 'b';
+  return null;
+}
+
+function seatColorForPlayer(room, playerId) {
+  if (!playerId) return null;
+  if (room.seats.w && room.seats.w.id === playerId) return 'w';
+  if (room.seats.b && room.seats.b.id === playerId) return 'b';
+  return null;
+}
+
+function roomIsEmpty(room) {
+  return !room.players.w && !room.players.b &&
+    !room.seats.w && !room.seats.b &&
+    room.spectators.length === 0;
+}
+
+function maybeCleanup(room) {
+  if (roomIsEmpty(room)) {
+    delete rooms[room.code];
+  }
 }
 
 // ---- Connection handling ------------------------------------------------
 
 wss.on('connection', function (ws) {
-  var client = { ws: ws, room: null, color: null };
+  var client = { ws: ws, room: null, color: null, playerId: null };
+
+  ws.isAlive = true;
+  ws.on('pong', function () { ws.isAlive = true; });
 
   ws.on('message', function (raw) {
     var msg;
@@ -159,20 +217,46 @@ wss.on('connection', function (ws) {
     } catch (e) {
       return send(ws, { type: 'error', message: 'Invalid message' });
     }
-    handleMessage(client, msg);
+    // A bug or malformed payload must never take down the whole server (and
+    // with it every other in-progress game), so isolate per-message handling.
+    try {
+      handleMessage(client, msg);
+    } catch (err) {
+      console.error('handler error:', err && err.message);
+      send(ws, { type: 'error', message: 'Server error handling request' });
+    }
   });
 
   ws.on('close', function () {
     handleDisconnect(client);
   });
+
+  ws.on('error', function () {
+    // A socket error is followed by 'close'; nothing extra to do here, but
+    // swallowing it prevents an unhandled 'error' from crashing the process.
+  });
 });
+
+// Heartbeat sweep: terminate sockets that did not answer the previous ping,
+// then ping everyone again.
+var heartbeat = setInterval(function () {
+  wss.clients.forEach(function (ws) {
+    if (ws.isAlive === false) {
+      return ws.terminate();
+    }
+    ws.isAlive = false;
+    try { ws.ping(); } catch (e) { /* ignore */ }
+  });
+}, HEARTBEAT_MS);
+
+wss.on('close', function () { clearInterval(heartbeat); });
 
 function handleMessage(client, msg) {
   switch (msg.type) {
     case 'create':
-      return doJoin(client, createRoom().code);
+      return doJoin(client, createRoom().code, msg.playerId);
     case 'join':
-      return doJoin(client, (msg.room || '').toUpperCase().trim());
+      return doJoin(client, String(msg.room || '').toUpperCase().trim(), msg.playerId);
     case 'move':
       return doMove(client, msg);
     case 'resign':
@@ -181,49 +265,86 @@ function handleMessage(client, msg) {
       return doRematch(client);
     case 'chat':
       return doChat(client, msg);
+    case 'ping':
+      // Application-level keepalive (some proxies only reset their idle timer
+      // on data frames, not WebSocket control frames).
+      return send(client.ws, { type: 'pong' });
     default:
       return send(client.ws, { type: 'error', message: 'Unknown command' });
   }
 }
 
-function doJoin(client, code) {
+function doJoin(client, code, playerId) {
   var room = rooms[code];
   if (!room) {
     return send(client.ws, { type: 'error', message: 'Room "' + code + '" not found' });
   }
-  // Leave any previous room first.
-  if (client.room) handleDisconnect(client);
 
-  var color = assignColor(room);
+  // Leave any previous room first (e.g. switching rooms on one connection).
+  if (client.room && client.room !== room) handleDisconnect(client);
+
+  client.playerId = playerId || client.playerId || genId();
+
+  // Try to reclaim a seat this player already owns (reconnect); otherwise
+  // take an open seat; otherwise spectate.
+  var color = seatColorForPlayer(room, client.playerId);
+  var reconnected = !!color;
+  if (!color) color = openColor(room);
+
   client.room = room;
   client.color = color;
 
   var spectator = false;
   if (color) {
+    // Cancel any pending grace timer for this seat and (re)occupy it.
+    if (room.disconnectTimers[color]) {
+      clearTimeout(room.disconnectTimers[color]);
+      room.disconnectTimers[color] = null;
+    }
+    // If a different live client somehow holds the seat, displace it.
+    if (room.players[color] && room.players[color] !== client) {
+      var old = room.players[color];
+      old.room = null;
+      old.color = null;
+      send(old.ws, { type: 'error', message: 'Seat taken over by another connection' });
+    }
+    room.seats[color] = { id: client.playerId };
     room.players[color] = client;
   } else {
     spectator = true;
-    room.spectators.push(client);
+    if (room.spectators.indexOf(client) === -1) room.spectators.push(client);
   }
 
   send(client.ws, {
     type: 'joined',
     room: room.code,
-    color: color, // null for spectators
+    color: color,            // null for spectators
+    playerId: client.playerId,
     spectator: spectator,
+    reconnected: reconnected,
     state: room.game.getState(),
-    status: room.gameOver
-      ? { over: true, result: room.gameOver.result, reason: room.gameOver.reason }
-      : room.game.status(),
+    status: statusOf(room),
     players: publicPlayers(room)
   });
 
-  broadcast(room, { type: 'opponent', event: 'joined', players: publicPlayers(room) }, client);
+  broadcast(room, {
+    type: 'opponent',
+    event: reconnected ? 'reconnected' : 'joined',
+    players: publicPlayers(room)
+  }, client);
 }
+
+var SQUARE_RE = /^[a-h][1-8]$/;
+var PROMO_RE = /^[qrbn]$/;
 
 function doMove(client, msg) {
   var room = client.room;
   if (!room) return send(client.ws, { type: 'error', message: 'Not in a room' });
+  // Validate coordinates before they reach the engine.
+  if (!SQUARE_RE.test(msg.from) || !SQUARE_RE.test(msg.to) ||
+      (msg.promotion != null && !PROMO_RE.test(msg.promotion))) {
+    return send(client.ws, { type: 'error', message: 'Invalid move' });
+  }
   if (room.gameOver) return send(client.ws, { type: 'error', message: 'Game is over' });
   if (!client.color) return send(client.ws, { type: 'error', message: 'Spectators cannot move' });
   if (room.game.turn !== client.color) {
@@ -238,7 +359,6 @@ function doMove(client, msg) {
     return send(client.ws, { type: 'error', message: 'Illegal move' });
   }
 
-  // Detect game end.
   var status = room.game.status();
   if (status.over) {
     room.gameOver = { result: status.result, reason: status.reason };
@@ -260,15 +380,20 @@ function doRematch(client) {
   if (!room || !client.color) return;
   if (!room.gameOver) return;
   room.rematchVotes[client.color] = true;
-  broadcast(room, { type: 'chat', from: 'system', text: (client.color === 'w' ? 'White' : 'Black') + ' wants a rematch.' });
+  broadcast(room, {
+    type: 'chat', from: 'system',
+    text: (client.color === 'w' ? 'White' : 'Black') + ' wants a rematch.'
+  });
 
   if (room.rematchVotes.w && room.rematchVotes.b) {
-    // Swap colors so players alternate sides.
+    // Swap colors so players alternate sides; keep seat ownership in sync.
     var w = room.players.w, b = room.players.b;
     room.players.w = b;
     room.players.b = w;
     if (room.players.w) room.players.w.color = 'w';
     if (room.players.b) room.players.b.color = 'b';
+    room.seats.w = room.players.w ? { id: room.players.w.playerId } : null;
+    room.seats.b = room.players.b ? { id: room.players.b.playerId } : null;
     room.game = new Chess();
     room.gameOver = null;
     room.rematchVotes = {};
@@ -277,7 +402,9 @@ function doRematch(client) {
         type: 'joined',
         room: room.code,
         color: c.color,
+        playerId: c.playerId,
         spectator: !c.color,
+        reconnected: false,
         state: room.game.getState(),
         status: room.game.status(),
         players: publicPlayers(room)
@@ -298,11 +425,25 @@ function doChat(client, msg) {
 function handleDisconnect(client) {
   var room = client.room;
   if (!room) return;
+  var color = client.color;
 
-  if (client.color && room.players[client.color] === client) {
-    room.players[client.color] = null;
-    delete room.rematchVotes[client.color];
-    broadcast(room, { type: 'opponent', event: 'left', players: publicPlayers(room) }, client);
+  if (color && room.players[color] === client) {
+    // Free the live connection but hold the seat open for a grace period so
+    // the player can reconnect and reclaim it.
+    room.players[color] = null;
+    broadcast(room, { type: 'opponent', event: 'disconnected', players: publicPlayers(room) }, client);
+
+    if (room.disconnectTimers[color]) clearTimeout(room.disconnectTimers[color]);
+    room.disconnectTimers[color] = setTimeout(function () {
+      room.disconnectTimers[color] = null;
+      // Only release if nobody reclaimed the seat in the meantime.
+      if (!room.players[color]) {
+        room.seats[color] = null;
+        delete room.rematchVotes[color];
+        broadcast(room, { type: 'opponent', event: 'left', players: publicPlayers(room) });
+        maybeCleanup(room);
+      }
+    }, DISCONNECT_GRACE_MS);
   } else {
     var idx = room.spectators.indexOf(client);
     if (idx !== -1) room.spectators.splice(idx, 1);
@@ -310,12 +451,17 @@ function handleDisconnect(client) {
 
   client.room = null;
   client.color = null;
-
-  // Clean up empty rooms.
-  if (!room.players.w && !room.players.b && room.spectators.length === 0) {
-    delete rooms[room.code];
-  }
+  maybeCleanup(room);
 }
+
+// Last-resort safety nets: a single unexpected error should not terminate
+// the process and disconnect every active game.
+process.on('uncaughtException', function (err) {
+  console.error('uncaughtException:', err && err.stack || err);
+});
+process.on('unhandledRejection', function (reason) {
+  console.error('unhandledRejection:', reason);
+});
 
 server.listen(PORT, function () {
   console.log('Chess server running at http://localhost:' + PORT);
