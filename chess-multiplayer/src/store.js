@@ -23,8 +23,11 @@ var path = require('path');
 
 function createStore(opts) {
   opts = opts || {};
-  var url = process.env.UPSTASH_REDIS_REST_URL || process.env.REDIS_REST_URL;
-  var token = process.env.UPSTASH_REDIS_REST_TOKEN || process.env.REDIS_REST_TOKEN;
+  // Env vars take precedence (so a dashboard setting can override / rotate
+  // without touching the repo); opts.redisUrl/redisToken are a fallback the
+  // caller may load from a committed config file.
+  var url = process.env.UPSTASH_REDIS_REST_URL || process.env.REDIS_REST_URL || opts.redisUrl;
+  var token = process.env.UPSTASH_REDIS_REST_TOKEN || process.env.REDIS_REST_TOKEN || opts.redisToken;
   if (url && token && typeof fetch === 'function') {
     return redisStore(url, token, opts);
   }

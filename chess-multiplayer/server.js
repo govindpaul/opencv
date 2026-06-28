@@ -151,7 +151,19 @@ function createRoom() {
 
 var DATA_FILE = process.env.CHESS_DATA_FILE || path.join(__dirname, '.data', 'rooms.json');
 var ROOM_TTL_MS = 24 * 60 * 60 * 1000; // forget rooms untouched for 24h
-var store = require('./src/store').createStore({ dataFile: DATA_FILE, ttlMs: ROOM_TTL_MS });
+// Convenience: allow Redis credentials to be supplied via a committed config
+// file (upstash.config.json) for hosts where setting env vars isn't possible.
+// Environment variables, if present, take precedence over this file.
+var upstashFallback = {};
+if (process.env.CHESS_IGNORE_CONFIG !== '1') {
+  try { upstashFallback = require('./upstash.config.json'); } catch (e) { /* none */ }
+}
+var store = require('./src/store').createStore({
+  dataFile: DATA_FILE,
+  ttlMs: ROOM_TTL_MS,
+  redisUrl: upstashFallback.UPSTASH_REDIS_REST_URL,
+  redisToken: upstashFallback.UPSTASH_REDIS_REST_TOKEN
+});
 var saveTimer = null;
 
 function buildDumps() {

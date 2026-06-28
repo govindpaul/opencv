@@ -27,7 +27,7 @@ function ok(cond, name) { if (cond) passed++; else { failed++; console.error('  
 var wait = function (ms) { return new Promise(function (r) { setTimeout(r, ms); }); };
 
 function startServer(extraEnv) {
-  var env = Object.assign({}, process.env, { PORT: String(PORT), CHESS_DATA_FILE: DATA }, extraEnv || {});
+  var env = Object.assign({}, process.env, { PORT: String(PORT), CHESS_DATA_FILE: DATA, CHESS_IGNORE_CONFIG: '1' }, extraEnv || {});
   var p = spawn('node', [SERVER], { env: env, stdio: 'ignore' });
   return p;
 }

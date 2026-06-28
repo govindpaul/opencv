@@ -52,9 +52,13 @@ async function main() {
   var fileStore = require('../src/store').createStore({ dataFile: fileFile });
   ok(fileStore.name === 'file', 'defaults to file backend without env vars');
 
+  // credentials via opts (e.g. loaded from a config file) also select redis
+  installMockFetch();
+  var rsOpts = require('../src/store').createStore({ redisUrl: 'https://example.upstash.io', redisToken: 'tok' });
+  ok(rsOpts.name === 'redis', 'selects redis backend when credentials passed via opts');
+
   process.env.UPSTASH_REDIS_REST_URL = 'https://example.upstash.io';
   process.env.UPSTASH_REDIS_REST_TOKEN = 'tok';
-  installMockFetch();
   var rs = freshStore();
   ok(rs.name === 'redis', 'selects redis backend when env vars present');
 
