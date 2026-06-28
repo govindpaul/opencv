@@ -1,0 +1,17 @@
+{
+  "name": "chess-multiplayer",
+  "version": "1.0.0",
+  "description": "A real-time, multiplayer web chess game with server-authoritative rules.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test/engine.test.js && node test/store.test.js && node test/integration.test.js"
+  },
+  "dependencies": {
+    "ws": "^8.21.0"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT"
+}

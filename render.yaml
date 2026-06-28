@@ -1,0 +1,22 @@
+# Render Blueprint for the multiplayer chess game (chess-multiplayer/).
+# This file only affects the chess game; it lets Render deploy the app in one
+# click from this repository. See chess-multiplayer/README.md for details.
+services:
+  - type: web
+    name: multiplayer-chess
+    runtime: node
+    rootDir: chess-multiplayer
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      # Optional: durable game persistence across restarts/redeploys via
+      # Upstash Redis (free). Create a database at https://upstash.com and set
+      # these in the Render dashboard (Environment tab). Without them the app
+      # falls back to a local file (wiped on Render free restarts).
+      - key: UPSTASH_REDIS_REST_URL
+        sync: false
+      - key: UPSTASH_REDIS_REST_TOKEN
+        sync: false
